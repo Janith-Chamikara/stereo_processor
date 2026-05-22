@@ -25,7 +25,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'calibration_capture = stereo_processor.calibration_capture:main'
+            'calibration_capture = stereo_processor.calibration_capture:main',
+            'stereo_sgbm_node = stereo_processor.stereo_sgbm_node:main',
+            'stereo_sync_capture = stereo_processor.stereo_sync_capture:main',
         ],
     },
 )

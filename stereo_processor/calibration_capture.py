@@ -11,7 +11,7 @@ class CalibrationCapture(Node):
         super().__init__('calibration_capture_node')
 
         # 1. Setup Parameters
-        self.declare_parameter('topic_name', '/camera/image/compressed')
+        self.declare_parameter('topic_name', 'left/camera/image/compressed')
         self.declare_parameter('save_dir', './calibration_images')
 
         topic_name = self.get_parameter('topic_name').value
