@@ -28,6 +28,8 @@ setup(
             'calibration_capture = stereo_processor.calibration_capture:main',
             'stereo_sgbm_node = stereo_processor.stereo_sgbm_node:main',
             'stereo_sync_capture = stereo_processor.stereo_sync_capture:main',
+            'stereo_cuda_bm_node = stereo_processor.stereo_cuda_bm_node:main',
+            'stereo_cpu_tuning_node = stereo_processor.stereo_cpu_tuning_node:main'
         ],
     },
 )

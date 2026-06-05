@@ -1,6 +1,7 @@
 import os
 import yaml
-import struct
+import cv2
+import numpy as np
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import CompressedImage, Image, PointCloud2, PointField
@@ -8,14 +9,12 @@ import sensor_msgs_py.point_cloud2 as pc2
 from std_msgs.msg import Header
 from cv_bridge import CvBridge
 import message_filters
-import cv2
-import numpy as np
 from rclpy.qos import qos_profile_sensor_data
 
 
-class StereoSGBMNode(Node):
+class StereoCpuTuningNode(Node):
     def __init__(self):
-        super().__init__('stereo_sgbm_node')
+        super().__init__('stereo_cpu_tuning_node')
 
         self.declare_parameter('left_topic', '/left/camera/image/compressed')
         self.declare_parameter('right_topic', '/right/camera/image/compressed')
@@ -30,84 +29,63 @@ class StereoSGBMNode(Node):
 
         self.image_size = (640, 480)
         self.rectification_initialized = False
-        self.Q = None  # The Disparity-to-Depth mapping matrix
+        self.Q = None
 
-        # --- NEW: ROS Publishers & Bridge ---
         self.bridge = CvBridge()
         self.depth_img_pub = self.create_publisher(
             Image, '/stereo/depth_image', 10)
         self.point_cloud_pub = self.create_publisher(
             PointCloud2, '/stereo/point_cloud', 10)
 
-        window_size = 11  # Up from 5
-        min_disp = 0
-        num_disp = 16 * 5  # Bumping this up to handle your 90mm wide baseline
+        # --- CPU SGBM Setup (Better for CPU than standard BM) ---
+        self.block_s = 5
+        self.num_disp = 16 * 8
 
         self.stereo = cv2.StereoSGBM_create(
-            minDisparity=min_disp,
-            numDisparities=num_disp,
-            blockSize=window_size,
-            P1=8 * 3 * window_size**2,
-            P2=32 * 3 * window_size**2,
-            disp12MaxDiff=2,          # Gives slight leeway in left/right consistency
-            # Stricter matching (up from 10) to reduce flying noise
-            uniquenessRatio=15,
-            # Aggressively deletes floating "glitch" clusters (up from 100)
-            speckleWindowSize=200,
-            # Tightens the speckle filter (down from 32)
+            minDisparity=0,
+            numDisparities=self.num_disp,
+            blockSize=self.block_s,
+            P1=8 * 3 * self.block_s**2,
+            P2=32 * 3 * self.block_s**2,
+            disp12MaxDiff=1,
+            uniquenessRatio=5,
+            speckleWindowSize=50,
             speckleRange=2,
-            preFilterCap=63,
+            preFilterCap=31,
             mode=cv2.STEREO_SGBM_MODE_SGBM_3WAY
         )
 
         self.left_sub = message_filters.Subscriber(
             self, CompressedImage, left_topic, qos_profile=qos_profile_sensor_data)
-
         self.right_sub = message_filters.Subscriber(
             self, CompressedImage, right_topic, qos_profile=qos_profile_sensor_data)
 
         self.ts = message_filters.ApproximateTimeSynchronizer(
-            [self.left_sub, self.right_sub], queue_size=10, slop=0.05
-        )
+            [self.left_sub, self.right_sub], queue_size=10, slop=0.05)
         self.ts.registerCallback(self.sync_callback)
 
-        self.get_logger().info("Live SGBM Node Initialized. Publishing to RViz2...")
+        self.get_logger().info("CPU Tuning Node Active!")
+        self.get_logger().info(
+            "FOCUS THE OPENCV WINDOW: Use Q/A for Block Size, W/S for Disparities.")
 
     def load_calibration_data(self, filepath):
-        if not os.path.exists(filepath):
-            self.get_logger().fatal(
-                f"Calibration file not found at: {filepath}")
-            raise FileNotFoundError(f"Missing {filepath}")
-
         with open(filepath, 'r') as file:
             calib = yaml.safe_load(file)
-
-        try:
-            self.K1 = np.array(calib['left_camera']
-                               ['intrinsics']).reshape(3, 3)
-            self.D1 = np.array(calib['left_camera']['distortion'])
-            self.K2 = np.array(calib['right_camera']
-                               ['intrinsics']).reshape(3, 3)
-            self.D2 = np.array(calib['right_camera']['distortion'])
-            self.R = np.array(calib['stereo']['rotation']).reshape(3, 3)
-            self.T = np.array(calib['stereo']['translation'])
-            self.get_logger().info(
-                f"Successfully loaded calibration data from {filepath}")
-        except KeyError as e:
-            self.get_logger().fatal(f"YAML formatting error. Missing key: {e}")
-            raise
+        self.K1 = np.array(calib['left_camera']['intrinsics']).reshape(3, 3)
+        self.D1 = np.array(calib['left_camera']['distortion'])
+        self.K2 = np.array(calib['right_camera']['intrinsics']).reshape(3, 3)
+        self.D2 = np.array(calib['right_camera']['distortion'])
+        self.R = np.array(calib['stereo']['rotation']).reshape(3, 3)
+        self.T = np.array(calib['stereo']['translation'])
 
     def init_rectification_maps(self):
-        # We now extract Q to calculate accurate 3D points
         R1, R2, P1, P2, self.Q, _, _ = cv2.stereoRectify(
-            self.K1, self.D1, self.K2, self.D2, self.image_size, self.R, self.T
-        )
+            self.K1, self.D1, self.K2, self.D2, self.image_size, self.R, self.T)
         self.map1_l, self.map2_l = cv2.initUndistortRectifyMap(
             self.K1, self.D1, R1, P1, self.image_size, cv2.CV_16SC2)
         self.map1_r, self.map2_r = cv2.initUndistortRectifyMap(
             self.K2, self.D2, R2, P2, self.image_size, cv2.CV_16SC2)
         self.rectification_initialized = True
-        self.get_logger().info("Rectification maps & Q matrix generated.")
 
     def sync_callback(self, left_msg, right_msg):
         left_np = np.frombuffer(left_msg.data, np.uint8)
@@ -116,59 +94,49 @@ class StereoSGBMNode(Node):
         left_frame = cv2.imdecode(left_np, cv2.IMREAD_COLOR)
         right_frame = cv2.imdecode(right_np, cv2.IMREAD_COLOR)
 
-        if left_frame is None or right_frame is None:
-            return
-
         if not self.rectification_initialized:
             self.init_rectification_maps()
 
+        # CPU Remap
         left_rect = cv2.remap(left_frame, self.map1_l,
                               self.map2_l, cv2.INTER_LINEAR)
         right_rect = cv2.remap(right_frame, self.map1_r,
                                self.map2_r, cv2.INTER_LINEAR)
 
-        left_gray = cv2.cvtColor(left_rect, cv2.COLOR_BGR2GRAY)
-        right_gray = cv2.cvtColor(right_rect, cv2.COLOR_BGR2GRAY)
+        # Grayscale & Compute
+        gray_left = cv2.cvtColor(left_rect, cv2.COLOR_BGR2GRAY)
+        gray_right = cv2.cvtColor(right_rect, cv2.COLOR_BGR2GRAY)
+        disparity = self.stereo.compute(gray_left, gray_right)
 
-        disparity = self.stereo.compute(left_gray, right_gray)
+        # Normalize and Colorize (The Rainbow Effect)
+        normalized_disparity = cv2.normalize(
+            disparity, None, 0.0, 1.0, cv2.NORM_MINMAX, cv2.CV_32F)
+        depth_map_color = cv2.applyColorMap(
+            np.uint8(normalized_disparity * 255), cv2.COLORMAP_JET)
 
-        # --- 1. Publish the 2D Depth Image (Colorized for RViz) ---
-        disp_normalized = cv2.normalize(
-            disparity, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
-        depth_map_color = cv2.applyColorMap(disp_normalized, cv2.COLORMAP_JET)
-
-        # Use the timestamp from the left camera message
+        # Publish 2D Depth
         header = Header()
         header.stamp = left_msg.header.stamp
         header.frame_id = 'stereo_camera_frame'
-
         depth_msg = self.bridge.cv2_to_imgmsg(depth_map_color, encoding="bgr8")
         depth_msg.header = header
         self.depth_img_pub.publish(depth_msg)
 
-        # --- 2. Publish the 3D Point Cloud ---
-        # Convert SGBM 16-bit format to true float disparity
+        # Publish True 3D Point Cloud (Rainbow Colored)
         disp_float = disparity.astype(np.float32) / 16.0
-
-        # Reproject to 3D using the Q matrix
         points_3D = cv2.reprojectImageTo3D(disp_float, self.Q)
-
-        # Filter out bad points (disparity <= 0 or points too far away)
         mask = (disp_float > 0)
-        valid_points = points_3D[mask]
-        valid_colors = left_rect[mask]
 
-        # Highly optimized NumPy packing for ROS 2 RGB floats
+        valid_points = points_3D[mask]
+        valid_colors = depth_map_color[mask]  # Rainbow trick applied here!
+
         r = valid_colors[:, 2].astype(np.uint32)
         g = valid_colors[:, 1].astype(np.uint32)
         b = valid_colors[:, 0].astype(np.uint32)
         rgb = (r << 16) | (g << 8) | b
         rgb_float = rgb.view(np.float32)
 
-        # Combine X, Y, Z, and RGB into a single array
         points_and_colors = np.column_stack((valid_points, rgb_float))
-
-        # Create and publish the PointCloud2 message
         fields = [
             PointField(name='x', offset=0,
                        datatype=PointField.FLOAT32, count=1),
@@ -179,19 +147,43 @@ class StereoSGBMNode(Node):
             PointField(name='rgb', offset=12,
                        datatype=PointField.FLOAT32, count=1),
         ]
-
         pc_msg = pc2.create_cloud(header, fields, points_and_colors)
         self.point_cloud_pub.publish(pc_msg)
+
+        # Live Tuning UI
+        cv2.imshow("CPU Live Tuning (Depth)", depth_map_color)
+        k = cv2.waitKey(1)
+        if k == ord('q'):
+            self.block_s += 2
+            self.stereo.setBlockSize(self.block_s)
+            self.stereo.setP1(8 * 3 * self.block_s**2)
+            self.stereo.setP2(32 * 3 * self.block_s**2)
+            self.get_logger().info(f"Block Size Increased: {self.block_s}")
+        elif k == ord('a'):
+            self.block_s = max(self.block_s - 2, 5)
+            self.stereo.setBlockSize(self.block_s)
+            self.stereo.setP1(8 * 3 * self.block_s**2)
+            self.stereo.setP2(32 * 3 * self.block_s**2)
+            self.get_logger().info(f"Block Size Decreased: {self.block_s}")
+        elif k == ord('w'):
+            self.num_disp += 16
+            self.stereo.setNumDisparities(self.num_disp)
+            self.get_logger().info(f"Disparities Increased: {self.num_disp}")
+        elif k == ord('s'):
+            self.num_disp = max(16, self.num_disp - 16)
+            self.stereo.setNumDisparities(self.num_disp)
+            self.get_logger().info(f"Disparities Decreased: {self.num_disp}")
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = StereoSGBMNode()
+    node = StereoCpuTuningNode()
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
     finally:
+        cv2.destroyAllWindows()
         node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
