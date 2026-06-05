@@ -1,5 +1,9 @@
 # Mean Reprojection Error: 0.6540 pixels
 
+image_size:
+  width: 640
+  height: 480
+
 left_camera:
   intrinsics: [1283.394458, 0.000000, 349.941405, 0.000000, 1266.313584, 238.983587, 0.000000, 0.000000, 1.000000]
   distortion: [0.090391, 1.562979, 0.000000, 0.000000, 0.000000]

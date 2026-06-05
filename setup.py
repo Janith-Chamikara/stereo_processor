@@ -29,7 +29,8 @@ setup(
             'stereo_sgbm_node = stereo_processor.stereo_sgbm_node:main',
             'stereo_sync_capture = stereo_processor.stereo_sync_capture:main',
             'stereo_cuda_bm_node = stereo_processor.stereo_cuda_bm_node:main',
-            'stereo_cpu_tuning_node = stereo_processor.stereo_cpu_tuning_node:main'
+            'stereo_cpu_tuning_node = stereo_processor.stereo_cpu_tuning_node:main',
+            'dynamic_tuner = stereo_processor.stereo_dynamic_tuner_node:main',
         ],
     },
 )

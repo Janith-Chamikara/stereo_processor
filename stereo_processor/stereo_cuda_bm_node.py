@@ -27,7 +27,7 @@ class StereoCudaBMNode(Node):
 
         self.load_calibration_data(calib_file_path)
 
-        self.image_size = (640, 480)
+        self.image_size = None
         self.rectification_initialized = False
         self.Q = None
 
@@ -39,7 +39,7 @@ class StereoCudaBMNode(Node):
 
         # --- CUDA BM Setup ---
         self.block_s = 5
-        self.num_disp = 16 * 8
+        self.num_disp = 16
 
         try:
             self.stereo = cv2.cuda.createStereoBM(
@@ -74,14 +74,39 @@ class StereoCudaBMNode(Node):
         self.D2 = np.array(calib['right_camera']['distortion'])
         self.R = np.array(calib['stereo']['rotation']).reshape(3, 3)
         self.T = np.array(calib['stereo']['translation'])
+        image_size = calib.get('image_size', {})
+        self.calibration_size = (
+            int(image_size.get('width', 640)),
+            int(image_size.get('height', 480)),
+        )
 
-    def init_rectification_maps(self):
+    def scaled_intrinsics(self, image_size):
+        calib_width, calib_height = self.calibration_size
+        image_width, image_height = image_size
+        scale_x = image_width / calib_width
+        scale_y = image_height / calib_height
+
+        K1 = self.K1.copy()
+        K2 = self.K2.copy()
+        K1[0, 0] *= scale_x
+        K1[0, 2] *= scale_x
+        K1[1, 1] *= scale_y
+        K1[1, 2] *= scale_y
+        K2[0, 0] *= scale_x
+        K2[0, 2] *= scale_x
+        K2[1, 1] *= scale_y
+        K2[1, 2] *= scale_y
+        return K1, K2
+
+    def init_rectification_maps(self, image_size):
+        self.image_size = image_size
+        K1, K2 = self.scaled_intrinsics(image_size)
         R1, R2, P1, P2, self.Q, _, _ = cv2.stereoRectify(
-            self.K1, self.D1, self.K2, self.D2, self.image_size, self.R, self.T)
+            K1, self.D1, K2, self.D2, self.image_size, self.R, self.T)
         self.map1_l, self.map2_l = cv2.initUndistortRectifyMap(
-            self.K1, self.D1, R1, P1, self.image_size, cv2.CV_16SC2)
+            K1, self.D1, R1, P1, self.image_size, cv2.CV_16SC2)
         self.map1_r, self.map2_r = cv2.initUndistortRectifyMap(
-            self.K2, self.D2, R2, P2, self.image_size, cv2.CV_16SC2)
+            K2, self.D2, R2, P2, self.image_size, cv2.CV_16SC2)
         self.rectification_initialized = True
 
     def sync_callback(self, left_msg, right_msg):
@@ -91,8 +116,12 @@ class StereoCudaBMNode(Node):
         left_frame = cv2.imdecode(left_np, cv2.IMREAD_COLOR)
         right_frame = cv2.imdecode(right_np, cv2.IMREAD_COLOR)
 
-        if not self.rectification_initialized:
-            self.init_rectification_maps()
+        if left_frame is None or right_frame is None:
+            return
+
+        image_size = (left_frame.shape[1], left_frame.shape[0])
+        if not self.rectification_initialized or image_size != self.image_size:
+            self.init_rectification_maps(image_size)
 
         # CPU Remap
         left_rect = cv2.remap(left_frame, self.map1_l,
@@ -116,6 +145,7 @@ class StereoCudaBMNode(Node):
         # Normalize and Colorize
         normalized_disparity = cv2.normalize(
             disparity, None, 0.0, 1.0, cv2.NORM_MINMAX, cv2.CV_32F)
+        normalized_disparity = cv2.GaussianBlur(normalized_disparity, (5, 5), 0)
         depth_map_color = cv2.applyColorMap(
             np.uint8(normalized_disparity * 255), cv2.COLORMAP_JET)
 
